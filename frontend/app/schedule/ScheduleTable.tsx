@@ -9,6 +9,7 @@ import {
 } from "../store/scheduleStore";
 
 const DAYS = 30;
+const API_URL = process.env.NEXT_PUBLIC_API_URL!;
 
 export function ScheduleTable() {
   const [startDate, setStartDate] = useState(
@@ -101,7 +102,7 @@ export function ScheduleTable() {
       const formData = new FormData();
       formData.append("file", file);
 
-      const res = await fetch("http://localhost:3001/schedule/upload-excel", {
+      const res = await fetch(`${API_URL}/schedule/upload-excel`, {
         method: "POST",
         body: formData,
       });

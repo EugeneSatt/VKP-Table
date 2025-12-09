@@ -34,7 +34,7 @@ export async function uploadExcel(file: File): Promise<any> {
   const formData = new FormData();
   formData.append("file", file);
 
-  const res = await fetch("http://localhost:3001/schedule/upload-excel", {
+  const res = await fetch(`${API_URL}/schedule/upload-excel`, {
     method: "POST",
     body: formData,
   });
