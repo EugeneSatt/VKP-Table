@@ -1,32 +1,31 @@
-// src/schedule/schedule.service.ts
-
 import { Injectable, BadRequestException } from "@nestjs/common";
+import { InjectRepository } from "@nestjs/typeorm";
+import { Between, Repository } from "typeorm";
 import * as XLSX from "xlsx";
 import { BulkUpsertDto } from "./dto/bulk-upsert.dto";
 import { RenameArticleDto } from "./dto/rename-article.dto";
+import { PlanSelf } from "./dto/plan-self.entity";
 
 const UPSERT_BATCH_SIZE = 600;
 
 // ---- Типы для матрицы, которую ест фронт ----
 
 export interface MatrixRow {
-  article: string; // текущий артикул (может быть изменён на фронте)
-  originalArticle: string | null; // исходный артикул (если был)
+  article: string;
+  originalArticle: string | null;
   values: (number | null)[];
 }
 
 export interface ScheduleMatrix {
-  startDate: string; // YYYY-MM-DD
+  startDate: string;
   days: number;
-  dates: string[]; // список дат в формате YYYY-MM-DD
+  dates: string[];
   rows: MatrixRow[];
 }
 
-// ---- Внутренний тип для хранения плана ----
-
 type PlanRecord = { date: Date; article: string; qty: number };
 
-// ===================== ХЕЛПЕРЫ =====================
+// ================== ХЕЛПЕРЫ ==================
 
 function excelValueToDate(v: any): Date | null {
   if (v instanceof Date) return v;
@@ -62,10 +61,6 @@ function toDateKey(d: Date | string | unknown): string {
   return parsed.toISOString().slice(0, 10);
 }
 
-/**
- * Дедупликация по (article, date).
- * Сейчас "последняя запись побеждает".
- */
 function deduplicateRecords(records: PlanRecord[]): PlanRecord[] {
   const map = new Map<string, PlanRecord>();
 
@@ -77,51 +72,35 @@ function deduplicateRecords(records: PlanRecord[]): PlanRecord[] {
   return Array.from(map.values());
 }
 
-// ===================== СЕРВИС =====================
+// ================== СЕРВИС ==================
 
 @Injectable()
 export class ScheduleService {
-  /**
-   * Простое хранилище в памяти:
-   *  article -> (dateKey -> qty)
-   */
-  private store = new Map<string, Map<string, number>>();
+  constructor(
+    @InjectRepository(PlanSelf)
+    private readonly repo: Repository<PlanSelf>,
+  ) {}
 
-  // ---------------------------------------------
-  // RAW данные (имитация SELECT из таблицы)
-  // ---------------------------------------------
-  async getRaw(startDate: string, days: number): Promise<PlanRecord[]> {
+  // RAW данные из БД
+  async getRaw(startDate: string, days: number): Promise<PlanSelf[]> {
     const start = new Date(startDate);
     if (isNaN(start.getTime())) {
       throw new BadRequestException("Неверная стартовая дата");
     }
     const end = addDays(start, days);
 
-    const result: PlanRecord[] = [];
-
-    for (const [article, dateMap] of this.store.entries()) {
-      for (const [dateKey, qty] of dateMap.entries()) {
-        const d = new Date(dateKey);
-        if (d >= start && d < end) {
-          result.push({ article, date: d, qty });
-        }
-      }
-    }
-
-    // чуть-чуть упорядочим
-    result.sort((a, b) => {
-      if (a.article === b.article) {
-        return a.date.getTime() - b.date.getTime();
-      }
-      return a.article.localeCompare(b.article);
+    return this.repo.find({
+      where: {
+        date: Between(start, end),
+      },
+      order: {
+        article: "ASC",
+        date: "ASC",
+      },
     });
-
-    return result;
   }
 
-  // ---------------------------------------------
-  // МАТРИЦА для фронта (артикулы × даты)
-  // ---------------------------------------------
+  // Матрица для фронта
   async getMatrix(startDate: string, days: number): Promise<ScheduleMatrix> {
     const rows = await this.getRaw(startDate, days);
 
@@ -131,7 +110,6 @@ export class ScheduleService {
       dateKeys.push(toDateKey(addDays(start, i)));
     }
 
-    // article → Map<dateKey, qty>
     const byArticle = new Map<string, Map<string, number>>();
 
     for (const row of rows) {
@@ -166,9 +144,7 @@ export class ScheduleService {
     };
   }
 
-  // ---------------------------------------------
-  // BULK UPSERT из фронта (матрица)
-  // ---------------------------------------------
+  // Bulk upsert
   async bulkUpsert(dto: BulkUpsertDto): Promise<void> {
     const rawRecords: PlanRecord[] = dto.entries.map((e) => ({
       date: new Date(e.date),
@@ -179,22 +155,13 @@ export class ScheduleService {
     const records = deduplicateRecords(rawRecords);
     if (!records.length) return;
 
-    // Записываем в in-memory store батчами (чисто для единообразия)
     for (let i = 0; i < records.length; i += UPSERT_BATCH_SIZE) {
       const chunk = records.slice(i, i + UPSERT_BATCH_SIZE);
-      for (const r of chunk) {
-        const dateKey = toDateKey(r.date);
-        if (!this.store.has(r.article)) {
-          this.store.set(r.article, new Map());
-        }
-        this.store.get(r.article)!.set(dateKey, r.qty);
-      }
+      await this.repo.upsert(chunk, ["date", "article"]);
     }
   }
 
-  // ---------------------------------------------
-  // ПЕРЕИМЕНОВАНИЕ артикула
-  // ---------------------------------------------
+  // Переименование артикула
   async renameArticle(dto: RenameArticleDto): Promise<{ updated: number }> {
     const oldArticle = dto.oldArticle.toUpperCase().trim();
     const newArticle = dto.newArticle.toUpperCase().trim();
@@ -207,28 +174,17 @@ export class ScheduleService {
       return { updated: 0 };
     }
 
-    const existing = this.store.get(oldArticle);
-    if (!existing) {
-      return { updated: 0 };
-    }
+    const result = await this.repo
+      .createQueryBuilder()
+      .update(PlanSelf)
+      .set({ article: newArticle })
+      .where("article = :oldArticle", { oldArticle })
+      .execute();
 
-    const existingNew = this.store.get(newArticle) ?? new Map<string, number>();
-
-    let updated = 0;
-    for (const [dateKey, qty] of existing.entries()) {
-      existingNew.set(dateKey, qty);
-      updated++;
-    }
-
-    this.store.set(newArticle, existingNew);
-    this.store.delete(oldArticle);
-
-    return { updated };
+    return { updated: result.affected ?? 0 };
   }
 
-  // ---------------------------------------------
-  // ИМПОРТ EXCEL (без БД, просто в память)
-  // ---------------------------------------------
+  // Импорт Excel в БД
   async importFromExcel(
     file: Express.Multer.File,
   ): Promise<{ inserted: number }> {
@@ -323,14 +279,8 @@ export class ScheduleService {
     let total = 0;
     for (let i = 0; i < records.length; i += UPSERT_BATCH_SIZE) {
       const chunk = records.slice(i, i + UPSERT_BATCH_SIZE);
-      for (const r of chunk) {
-        const dateKey = toDateKey(r.date);
-        if (!this.store.has(r.article)) {
-          this.store.set(r.article, new Map());
-        }
-        this.store.get(r.article)!.set(dateKey, r.qty);
-        total++;
-      }
+      await this.repo.upsert(chunk, ["date", "article"]);
+      total += chunk.length;
     }
 
     return { inserted: total };

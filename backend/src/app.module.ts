@@ -1,33 +1,42 @@
 import { Module } from "@nestjs/common";
-import { ConfigModule } from "@nestjs/config";
+import { ConfigModule, ConfigService } from "@nestjs/config";
 import { TypeOrmModule } from "@nestjs/typeorm";
 import { ScheduleModule } from "./schedule/schedule.module";
 import { PlanSelf } from "./schedule/dto/plan-self.entity";
 
-// БАЗОВЫЕ ИМПОРТЫ – ВСЕГДА
-const importsArray: any[] = [
-  ConfigModule.forRoot({ isGlobal: true }),
-  ScheduleModule,
-];
-
-// ПОДКЛЮЧЕНИЕ К MSSQL – ТОЛЬКО ЕСЛИ БД ВКЛЮЧЕНА
-if (process.env.DISABLE_DB !== "1") {
-  importsArray.push(
-    TypeOrmModule.forRoot({
-      type: "mssql",
-      host: process.env.DB_HOST || process.env.SQL_SERVER,
-      port: Number(process.env.DB_PORT) || 1433,
-      username: process.env.DB_USERNAME || process.env.SQL_USER,
-      password: process.env.DB_PASSWORD || process.env.SQL_PASSWORD,
-      database: process.env.DB_NAME || process.env.SQL_DATABASE,
-      entities: [PlanSelf],
-      synchronize: false,
-      options: { encrypt: false },
-    }),
-  );
-}
-
 @Module({
-  imports: importsArray,
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true }),
+
+    // Подключение MSSQL через TypeORM
+    TypeOrmModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        type: "mssql",
+        host:
+          config.get<string>("DB_HOST") ??
+          config.get<string>("SQL_SERVER"),
+        port: Number(
+          config.get<string>("DB_PORT") ?? config.get<string>("SQL_PORT") ?? 1433,
+        ),
+        username:
+          config.get<string>("DB_USER") ??
+          config.get<string>("SQL_USER"),
+        password:
+          config.get<string>("DB_PASS") ??
+          config.get<string>("SQL_PASSWORD"),
+        database:
+          config.get<string>("DB_NAME") ??
+          config.get<string>("SQL_DATABASE"),
+        entities: [PlanSelf],
+        synchronize: false, // схема уже есть
+        options: {
+          encrypt: false, // если нужно шифрование — поставишь true
+        },
+      }),
+    }),
+
+    ScheduleModule,
+  ],
 })
 export class AppModule {}

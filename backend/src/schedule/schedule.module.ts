@@ -1,10 +1,11 @@
 import { Module } from "@nestjs/common";
+import { TypeOrmModule } from "@nestjs/typeorm";
 import { ScheduleController } from "./schedule.controller";
 import { ScheduleService } from "./schedule.service";
-// НЕ импортируем TypeOrmModule, НЕ тянем PlanSelf/PlanSelfRepository
+import { PlanSelf } from "./dto/plan-self.entity";
 
 @Module({
-  imports: [],
+  imports: [TypeOrmModule.forFeature([PlanSelf])],
   controllers: [ScheduleController],
   providers: [ScheduleService],
 })
